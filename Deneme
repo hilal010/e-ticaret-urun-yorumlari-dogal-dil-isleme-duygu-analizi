@@ -1,0 +1,200 @@
+import multiprocessing
+import re
+import pandas as pd
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+import string
+from gensim import corpora
+from gensim.models import LdaModel
+from gensim.models import CoherenceModel
+from gensim.corpora import Dictionary
+import spacy
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import classification_report
+from nltk.probability import FreqDist
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+from textblob import TextBlob
+
+nltk.download('stopwords')
+nltk.download('punkt')
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
+    # CSV dosyasını okuma
+    df = pd.read_csv('e-ticaret_urun_yorumlari.csv', sep=';')
+
+    # spaCy'nin Türkçe modelini yükleyelim
+    nlp = spacy.load("tr_core_news_lg")
+
+    # Küçük harfe dönüştürme
+    df['temizlenmiş'] = df['Metin'].apply(lambda x: x.lower())
+
+    # Noktalama işaretlerini kaldırma
+    df['temizlenmiş'] = df['temizlenmiş'].apply(lambda x: x.translate(str.maketrans('', '', string.punctuation)))
+
+    # Durak kelimeleri (stop words) kaldırma
+    stop_words = set(stopwords.words('turkish'))  # Türkçe durak kelimeleri
+    df['temizlenmiş'] = df['temizlenmiş'].apply(lambda x: ' '.join([word for word in word_tokenize(x) if word not in stop_words]))
+
+    # Spacy kullanarak lemmatization işlemi
+    def spacy_lemmatize(text):
+        doc = nlp(text)
+        lemmatized_text = ' '.join([token.lemma_ for token in doc if not token.is_stop])
+        if lemmatized_text:
+            return lemmatized_text
+        else:
+            return ""
+
+    # Kökleri bulma (lemmatization)
+    df['lemmatized'] = df['temizlenmiş'].apply(spacy_lemmatize)
+
+    # Sentiment analiz fonksiyonu (TextBlob kullanımı)
+    def sentiment_analysis(text):
+        analysis = TextBlob(text)
+        return analysis.sentiment.polarity
+
+    # Sentiment analiz uygulama ve sentiment sütununun eklenmesi
+    df['sentiment'] = df['lemmatized'].apply(sentiment_analysis)
+
+    # Sentiment sütununun mevcut olup olmadığını kontrol edin
+    if 'sentiment' in df.columns:
+        print("Sentiment sütunu başarıyla eklendi.")
+    else:
+        print("Sentiment sütunu eklenemedi.")
+
+    # Veri bölme
+    x_train, x_test, y_train, y_test = train_test_split(df['lemmatized'], df['Durum'], test_size=0.2, random_state=42)
+
+    # Etiketleri kategorik değerlere dönüştürme
+    def convert_label(Durum):
+        if Durum == 1:
+            return "olumlu"
+        elif Durum == 0:
+            return "olumsuz"
+        elif Durum == 2:
+            return "nötr"
+        else:
+            return "bilinmeyen"
+
+    y_train_cat = y_train.apply(convert_label)
+    y_test_cat = y_test.apply(convert_label)
+
+    # TF-IDF vektörlerini oluşturma
+    tfidf_vectorizer = TfidfVectorizer()
+    X_train_tfidf = tfidf_vectorizer.fit_transform(x_train)
+    X_test_tfidf = tfidf_vectorizer.transform(x_test)
+
+    # Model eğitimi
+    nb_classifier = MultinomialNB()
+    nb_classifier.fit(X_train_tfidf, y_train_cat)
+
+    # Tahminler yapma
+    y_pred = nb_classifier.predict(X_test_tfidf)
+
+    # LDA için gerekli veri hazırlığı
+    def preprocess_text(lemmatized):
+        return [word for word in word_tokenize(lemmatized) if word not in stop_words and word.isalpha()]
+
+    # Preprocessed text'i oluştur
+    df['processed'] = df['lemmatized'].apply(preprocess_text)
+
+    # Gensim için sözlük ve corpus oluşturma
+    dictionary = Dictionary(df['processed'])
+    corpus = [dictionary.doc2bow(text) for text in df['processed']]
+
+    # LDA Modeli oluşturma
+    num_topics = 17
+    lda_model = LdaModel(corpus=corpus, id2word=dictionary, num_topics=num_topics, random_state=42, passes=10)
+
+    # LDA modelinin konularını görüntüleme
+    for idx, topic in lda_model.print_topics(-1):
+        print(f'Topic: {idx}\nWords: {topic}\n')
+
+    # Konu uyumunu hesaplama
+    coherence_model_lda = CoherenceModel(model=lda_model, texts=df['processed'], dictionary=dictionary, coherence='c_v')
+    coherence_lda = coherence_model_lda.get_coherence()
+    print('\nCoherence Score: ', coherence_lda)
+
+    # Performans değerlendirmesi
+    print(classification_report(y_test_cat, y_pred))
+
+    # Her belgedeki baskın konuyu belirleme
+    def get_dominant_topic(lda_model, corpus):
+        dominant_topics = []
+        for doc_bow in corpus:
+            topic_probs = lda_model[doc_bow]
+            dominant_topic = max(topic_probs, key=lambda x: x[1])[0]
+            dominant_topics.append(dominant_topic)
+        return dominant_topics
+
+    df['dominant_topic'] = get_dominant_topic(lda_model, corpus)
+    #print(df['dominant_topic'])
+
+
+    # Konu isimlerini al
+    topic_names = {
+        0: 'İadeler ve Sorunlar',
+        1: 'Negatif Kalite',
+        2: 'Genel Ürün İncelemeleri',
+        3: 'Olumlu İncelemeler',
+        4: 'Ürün Boyutu ve Uygunluğu',
+        5: 'Memnuniyet ve Paketleme',
+        6: 'Tavsiyeler',
+        7: 'Teslimat ve Hız',
+        8: 'Ürün Kullanımı',
+        9: 'Uzun Süreli Kullanım',
+        10: 'Genel Yorumlar',
+        11: 'Fiyatlandırma ve Değer',
+        12: 'Ürün Durumu',
+        13: 'Telefon ve Aksesuarları',
+        14: 'Kalite ve Tercihler',
+        15: 'Çeşitli',
+        16: 'Müşteri Geri Bildirimi'
+    }
+
+    # Konulara göre duygu analizini hesaplama
+    topic_sentiment = df.groupby('dominant_topic')['sentiment'].mean()
+
+    # Konulara göre duygu analizini görselleştirme
+    plt.figure(figsize=(12, 8))
+    topic_sentiment.plot(kind='bar')
+    plt.xlabel('Topic')
+    plt.ylabel('Average Sentiment Score')
+    plt.title('Average Sentiment Score by Topic')
+    plt.xticks(rotation=45)
+    plt.show()
+
+    # Konu isimlerini yazdırma
+    for topic_id, topic_name in topic_names.items():
+        print(f'{topic_id}: {topic_name}')
+
+    def plot_word_cloud(lda_model, num_topics, topic_names):
+        # Her bir konunun anahtar kelimelerini alın
+        topics = lda_model.show_topics(num_topics=num_topics, formatted=False)
+        
+        # Her bir konu için bir kelime bulutu oluşturun
+        for (topic_id, words), (topic_id_name, topic_name) in zip(topics, topic_names.items()):
+            wordcloud = WordCloud(background_color='white').generate_from_frequencies(dict(words))
+            
+            # Kelime bulutunu görselleştirin
+            plt.figure(figsize=(8, 6))
+            plt.imshow(wordcloud, interpolation='bilinear')
+            plt.title(f'{topic_name}')
+            plt.axis('off')
+        
+        # Tüm figürleri göster
+        plt.show()
+
+
+    # Örnek olarak 5 konu ile LDA modelinizi kullanın
+    num_topics = 17
+    plot_word_cloud(lda_model, num_topics, topic_names)
+    
